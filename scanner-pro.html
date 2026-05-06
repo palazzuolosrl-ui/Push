@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scanner Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <script src="https://unpkg.com/tesseract.js@v4.0.1/dist/tesseract.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --surface2: #22263a;
+            --accent: #4fffb0;
+            --accent2: #7b6ff0;
+            --warn: #ffd166;
+            --danger: #ff6b6b;
+            --text: #e8eaf6;
+            --muted: #6b7280;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'IBM Plex Sans', sans-serif;
+            min-height: 100vh;
+        }
+        .mono { font-family: 'IBM Plex Mono', monospace; }
+
+        /* Scanner viewport */
+        #reader { border: none !important; background: transparent !important; }
+        #reader video { 
+            border-radius: 12px; 
+            object-fit: cover; 
+            width: 100% !important;
+        }
+        #reader img { display: none !important; }
+        #reader__scan_region { background: transparent !important; }
+        #reader__dashboard { display: none !important; }
+
+        /* Scanline animation */
+        @keyframes scanline {
+            0% { top: 10%; opacity: 1; }
+            100% { top: 90%; opacity: 0.4; }
+        }
+        .scanline {
+            position: absolute;
+            left: 5%;
+            width: 90%;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--accent), transparent);
+            animation: scanline 1.8s ease-in-out infinite alternate;
+            pointer-events: none;
+            box-shadow: 0 0 8px var(--accent);
+        }
+
+        /* Pulse dot */
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.3); }
+        }
+        .pulse-dot {
+            display: inline-block;
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: var(--accent);
+            animation: pulse 1.2s ease-in-out infinite;
+        }
+
+        /* Slide in */
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .slide-in { animation: slideIn 0.3s ease forwards; }
+
+        /* Fade */
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        /* Button press */
+        .btn:active { transform: scale(0.96); }
+        .btn { transition: all 0.15s ease; }
+        .btn:hover { filter: brightness(1.1); }
+
+        /* Corner brackets for scanner frame */
+        .scanner-frame::before,
+        .scanner-frame::after,
+        .scanner-frame > span::before,
+        .scanner-frame > span::after {
+            content: '';
+            position: absolute;
+            width: 22px;
+            height: 22px;
+            border-color: var(--accent);
+            border-style: solid;
+        }
+        .scanner-frame::before { top: 8px; left: 8px; border-width: 2px 0 0 2px; }
+        .scanner-frame::after { top: 8px; right: 8px; border-width: 2px 2px 0 0; }
+        .scanner-frame > span::before { bottom: 8px; left: 8px; border-width: 0 0 2px 2px; }
+        .scanner-frame > span::after { bottom: 8px; right: 8px; border-width: 0 2px 2px 0; }
+
+        /* Type badge */
+        .badge-ean { background: rgba(79, 255, 176, 0.15); color: var(--accent); }
+        .badge-ocr { background: rgba(123, 111, 240, 0.15); color: var(--accent2); }
+        
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: var(--surface); }
+        ::-webkit-scrollbar-thumb { background: var(--surface2); border-radius: 4px; }
+
+        /* Toast */
+        #toast {
+            position: fixed; bottom: 24px; left: 50%;
+            transform: translateX(-50%) translateY(80px);
+            background: var(--surface2);
+            border: 1px solid rgba(79,255,176,0.3);
+            color: var(--text);
+            padding: 10px 20px;
+            border-radius: 50px;
+            font-size: 13px;
+            transition: transform 0.3s ease;
+            z-index: 100;
+            white-space: nowrap;
+        }
+        #toast.show { transform: translateX(-50%) translateY(0); }
+
+        .progress-bar {
+            height: 3px;
+            background: linear-gradient(90deg, var(--accent2), var(--accent));
+            border-radius: 2px;
+            transition: width 0.3s ease;
+        }
+    </style>
+</head>
+<body>
+
+<div class="max-w-md mx-auto p-4 pb-8">
+
+    <!-- Header -->
+    <header class="py-5 mb-4">
+        <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl flex items-center justify-center" style="background: var(--surface2); border: 1px solid rgba(79,255,176,0.3);">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2">
+                    <path d="M3 7V5a2 2 0 012-2h2M17 3h2a2 2 0 012 2v2M21 17v2a2 2 0 01-2 2h-2M7 21H5a2 2 0 01-2-2v-2"/>
+                    <rect x="7" y="7" width="3" height="10" rx="1"/>
+                    <rect x="14" y="7" width="3" height="6" rx="1"/>
+                    <rect x="14" y="16" width="3" height="1" rx="0.5"/>
+                </svg>
+            </div>
+            <div>
+                <h1 class="font-bold text-lg mono" style="color: var(--accent)">Scanner Pro</h1>
+                <p class="text-xs mono" style="color: var(--muted)">EAN · OCR · Excel</p>
+            </div>
+            <div class="ml-auto">
+                <span id="count-badge" class="mono text-xs px-3 py-1 rounded-full" style="background: var(--surface2); color: var(--muted)">0 scan</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Camera viewport -->
+    <div class="relative mb-4 rounded-2xl overflow-hidden scanner-frame" style="background: var(--surface); border: 1px solid var(--surface2);">
+        <span></span>
+        <div id="reader" class="w-full" style="min-height: 220px;"></div>
+        <div id="scanline-el" class="scanline hidden"></div>
+        
+        <!-- Stato placeholder -->
+        <div id="camera-placeholder" class="flex flex-col items-center justify-center gap-3 py-12">
+            <div style="color: var(--muted); opacity: 0.5;">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/>
+                    <circle cx="12" cy="13" r="4"/>
+                </svg>
+            </div>
+            <p class="text-sm mono" style="color: var(--muted)">Premi un pulsante per iniziare</p>
+        </div>
+
+        <!-- Status bar -->
+        <div id="status-bar" class="hidden px-4 py-3 flex items-center gap-2" style="background: rgba(0,0,0,0.6); backdrop-filter: blur(8px);">
+            <span class="pulse-dot"></span>
+            <span id="status-text" class="text-xs mono" style="color: var(--accent)">In attesa...</span>
+        </div>
+    </div>
+
+    <!-- OCR Progress -->
+    <div id="ocr-progress" class="hidden mb-4 p-3 rounded-xl" style="background: var(--surface); border: 1px solid var(--surface2);">
+        <div class="flex justify-between mb-2">
+            <span class="text-xs mono" style="color: var(--accent2)">Analisi OCR</span>
+            <span id="ocr-percent" class="text-xs mono" style="color: var(--muted)">0%</span>
+        </div>
+        <div style="background: var(--surface2); border-radius: 4px; height: 3px;">
+            <div id="ocr-bar" class="progress-bar" style="width: 0%"></div>
+        </div>
+    </div>
+
+    <!-- Pulsanti azione -->
+    <div class="grid grid-cols-2 gap-3 mb-4">
+        <button id="btn-ean" onclick="startBarcodeScanner()" class="btn rounded-xl p-4 font-semibold text-sm flex flex-col gap-1 items-start" 
+            style="background: var(--surface); border: 1px solid var(--surface2);">
+            <span class="text-xl">📷</span>
+            <span style="color: var(--accent)">Scansiona EAN</span>
+            <span class="text-xs" style="color: var(--muted)">Barcode / QR Code</span>
+        </button>
+        
+        <button id="btn-ocr" onclick="triggerOCR()" class="btn rounded-xl p-4 font-semibold text-sm flex flex-col gap-1 items-start"
+            style="background: var(--surface); border: 1px solid var(--surface2);">
+            <span class="text-xl">📝</span>
+            <span style="color: var(--accent2)">Scansiona Testo</span>
+            <span class="text-xs" style="color: var(--muted)">OCR da immagine</span>
+        </button>
+
+        <label class="btn rounded-xl p-4 font-semibold text-sm flex flex-col gap-1 items-start cursor-pointer"
+            style="background: var(--surface); border: 1px solid var(--surface2);">
+            <span class="text-xl">📁</span>
+            <span style="color: var(--warn)">Carica File</span>
+            <span class="text-xs" style="color: var(--muted)">JPG, PNG, WebP</span>
+            <input type="file" id="file-input" accept="image/*" class="hidden" onchange="handleFileOCR(event)">
+        </label>
+
+        <button onclick="stopAll()" class="btn rounded-xl p-4 font-semibold text-sm flex flex-col gap-1 items-start"
+            style="background: var(--surface); border: 1px solid var(--surface2);">
+            <span class="text-xl">⏹</span>
+            <span style="color: var(--danger)">Stop Scanner</span>
+            <span class="text-xs" style="color: var(--muted)">Ferma fotocamera</span>
+        </button>
+    </div>
+
+    <!-- Export -->
+    <button onclick="exportToExcel()" class="btn w-full mb-6 py-3 px-5 rounded-xl flex items-center justify-center gap-3 font-semibold text-sm"
+        style="background: linear-gradient(135deg, var(--accent2), #5b8dee); color: white; border: none;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+        </svg>
+        Esporta in Excel
+    </button>
+
+    <!-- Cronologia -->
+    <div class="rounded-2xl overflow-hidden" style="background: var(--surface); border: 1px solid var(--surface2);">
+        <div class="flex justify-between items-center p-4" style="border-bottom: 1px solid var(--surface2);">
+            <h2 class="font-semibold mono text-sm" style="color: var(--text)">Cronologia</h2>
+            <button onclick="clearHistory()" class="text-xs mono px-3 py-1 rounded-lg btn" style="color: var(--danger); background: rgba(255,107,107,0.1);">
+                Svuota
+            </button>
+        </div>
+        <div id="history-list" class="divide-y max-h-72 overflow-y-auto" style="divide-color: var(--surface2)">
+            <div id="empty-state" class="p-8 text-center">
+                <p class="text-sm mono" style="color: var(--muted)">Nessuna scansione ancora</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Toast -->
+<div id="toast">✓ Copiato</div>
+
+<script>
+    // ─── STATE ──────────────────────────────────────────────────────────────────
+    let html5QrCode = null;
+    let isScanning = false;
+    let ocrMode = false; // se true, il file input avvia OCR; altrimenti ignora
+    
+    // Usa array in memoria (localStorage non disponibile in tutti i contesti)
+    let scanHistory = [];
+    try {
+        const saved = localStorage.getItem('scannerPro_history');
+        if (saved) scanHistory = JSON.parse(saved);
+    } catch(e) { /* silenzioso */ }
+
+    updateHistoryUI();
+
+    // ─── UTILS ──────────────────────────────────────────────────────────────────
+    function saveHistory() {
+        try { localStorage.setItem('scannerPro_history', JSON.stringify(scanHistory)); } catch(e) {}
+    }
+
+    function showToast(msg = '✓ Salvato') {
+        const t = document.getElementById('toast');
+        t.textContent = msg;
+        t.classList.add('show');
+        setTimeout(() => t.classList.remove('show'), 2200);
+    }
+
+    function setStatus(text, visible = true) {
+        const bar = document.getElementById('status-bar');
+        const txt = document.getElementById('status-text');
+        txt.textContent = text;
+        bar.classList.toggle('hidden', !visible);
+    }
+
+    function setScanline(visible) {
+        document.getElementById('scanline-el').classList.toggle('hidden', !visible);
+    }
+
+    function showPlaceholder(visible) {
+        document.getElementById('camera-placeholder').classList.toggle('hidden', !visible);
+    }
+
+    async function stopScanner() {
+        if (html5QrCode) {
+            try {
+                const state = html5QrCode.getState();
+                // 2 = SCANNING, 3 = PAUSED
+                if (state === 2 || state === 3) {
+                    await html5QrCode.stop();
+                }
+            } catch(e) { /* ignora errori di stop */ }
+        }
+        isScanning = false;
+        setScanline(false);
+        setStatus('', false);
+    }
+
+    async function stopAll() {
+        await stopScanner();
+        showPlaceholder(true);
+        showToast('⏹ Scanner fermato');
+    }
+
+    // ─── BARCODE / QR ───────────────────────────────────────────────────────────
+    async function startBarcodeScanner() {
+        await stopScanner();
+        showPlaceholder(false);
+
+        // Crea nuova istanza ogni volta per evitare bug di reinizializzazione
+        try {
+            html5QrCode = new Html5Qrcode("reader");
+        } catch(e) {
+            showToast('⚠ Errore inizializzazione scanner');
+            return;
+        }
+
+        const config = {
+            fps: 12,
+            qrbox: { width: 240, height: 140 },
+            aspectRatio: 1.5,
+            supportedScanTypes: [
+                Html5QrcodeScanType.SCAN_TYPE_CAMERA
+            ]
+        };
+
+        try {
+            await html5QrCode.start(
+                { facingMode: "environment" },
+                config,
+                (decodedText, decodedResult) => {
+                    const fmt = decodedResult?.result?.format?.formatName || 'BARCODE';
+                    addResult(decodedText, fmt);
+                    stopScanner();
+                    showPlaceholder(false);
+                    setStatus('✓ ' + decodedText, true);
+                }
+            );
+            isScanning = true;
+            setScanline(true);
+            setStatus('In ascolto — inquadra il barcode', true);
+        } catch(err) {
+            showPlaceholder(true);
+            const msg = err.toString().includes('permission')
+                ? 'Permesso fotocamera negato. Controlla le impostazioni del browser.'
+                : 'Fotocamera non disponibile: ' + err;
+            showToast('⚠ ' + msg.substring(0, 60));
+        }
+    }
+
+    // ─── OCR ────────────────────────────────────────────────────────────────────
+    function triggerOCR() {
+        ocrMode = true;
+        document.getElementById('file-input').click();
+    }
+
+    async function handleFileOCR(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        // Reset input per permettere ricaricamento dello stesso file
+        e.target.value = '';
+
+        // Se non è modalità OCR, ignora (non dovrebbe accadere)
+        if (!ocrMode) return;
+        ocrMode = false;
+
+        await stopScanner();
+        showPlaceholder(false);
+
+        const progressEl = document.getElementById('ocr-progress');
+        const barEl = document.getElementById('ocr-bar');
+        const pctEl = document.getElementById('ocr-percent');
+
+        progressEl.classList.remove('hidden');
+        setStatus('Analisi OCR in corso...', true);
+
+        try {
+            const { data: { text } } = await Tesseract.recognize(
+                file,
+                'ita+eng',
+                {
+                    logger: m => {
+                        if (m.status === 'recognizing text') {
+                            const pct = Math.round(m.progress * 100);
+                            barEl.style.width = pct + '%';
+                            pctEl.textContent = pct + '%';
+                        }
+                    }
+                }
+            );
+
+            const cleaned = text.trim();
+            if (cleaned.length === 0) {
+                showToast('⚠ Nessun testo rilevato nell\'immagine');
+                setStatus('', false);
+            } else {
+                addResult(cleaned, 'TESTO OCR');
+                setStatus('✓ Testo estratto con successo', true);
+            }
+        } catch(err) {
+            showToast('⚠ Errore OCR: ' + err.message);
+            setStatus('', false);
+        } finally {
+            progressEl.classList.add('hidden');
+            barEl.style.width = '0%';
+        }
+    }
+
+    // ─── GESTIONE DATI ──────────────────────────────────────────────────────────
+    function addResult(content, type) {
+        const now = new Date();
+        const entry = {
+            date: now.toLocaleDateString('it-IT'),
+            time: now.toLocaleTimeString('it-IT'),
+            content: content,
+            type: type,
+            ts: now.getTime()
+        };
+        scanHistory.unshift(entry);
+        saveHistory();
+        updateHistoryUI();
+
+        if (navigator.vibrate) navigator.vibrate([40, 20, 40]);
+        showToast('✓ Aggiunto: ' + type);
+    }
+
+    function updateHistoryUI() {
+        const list = document.getElementById('history-list');
+        const badge = document.getElementById('count-badge');
+        const empty = document.getElementById('empty-state');
+
+        badge.textContent = scanHistory.length + ' scan';
+
+        if (scanHistory.length === 0) {
+            list.innerHTML = `
+                <div id="empty-state" class="p-8 text-center">
+                    <p class="text-sm mono" style="color: var(--muted)">Nessuna scansione ancora</p>
+                </div>`;
+            return;
+        }
+
+        list.innerHTML = scanHistory.map((item, i) => {
+            const isOCR = item.type === 'TESTO OCR';
+            const badgeClass = isOCR ? 'badge-ocr' : 'badge-ean';
+            const truncated = item.content.length > 120
+                ? item.content.substring(0, 120) + '…'
+                : item.content;
+
+            return `
+            <div class="p-4 slide-in" style="animation-delay: ${i * 30}ms">
+                <div class="flex justify-between items-start gap-2 mb-1">
+                    <span class="text-xs mono px-2 py-0.5 rounded-md font-semibold ${badgeClass}">${item.type}</span>
+                    <span class="text-xs mono shrink-0" style="color: var(--muted)">${item.date} ${item.time}</span>
+                </div>
+                <p class="text-sm mt-1 break-all cursor-pointer leading-relaxed" 
+                    style="color: var(--text)" 
+                    onclick="copyToClipboard('${escapeForAttr(item.content)}')"
+                    title="Tocca per copiare">${escapeHTML(truncated)}</p>
+            </div>`;
+        }).join('');
+    }
+
+    function escapeHTML(str) {
+        return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function escapeForAttr(str) {
+        return str.replace(/'/g, "\\'").replace(/\n/g, ' ').replace(/\r/g, '');
+    }
+
+    function copyToClipboard(text) {
+        navigator.clipboard.writeText(text)
+            .then(() => showToast('📋 Copiato negli appunti'))
+            .catch(() => showToast('⚠ Copia non supportata'));
+    }
+
+    function clearHistory() {
+        if (!confirm('Cancellare tutte le scansioni?')) return;
+        scanHistory = [];
+        saveHistory();
+        updateHistoryUI();
+        showToast('🗑 Cronologia svuotata');
+    }
+
+    // ─── EXPORT EXCEL ───────────────────────────────────────────────────────────
+    function exportToExcel() {
+        if (scanHistory.length === 0) {
+            showToast('⚠ Nessun dato da esportare');
+            return;
+        }
+
+        const rows = scanHistory.map(item => ({
+            'Data':     item.date,
+            'Ora':      item.time,
+            'Tipo':     item.type,
+            'Contenuto': item.content
+        }));
+
+        const ws = XLSX.utils.json_to_sheet(rows);
+
+        // Larghezze colonne
+        ws['!cols'] = [
+            { wch: 12 }, // Data
+            { wch: 10 }, // Ora
+            { wch: 14 }, // Tipo
+            { wch: 60 }, // Contenuto
+        ];
+
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Scansioni');
+
+        const filename = `Scanner_Pro_${new Date().toISOString().slice(0,10)}.xlsx`;
+        XLSX.writeFile(wb, filename);
+        showToast('📊 File Excel scaricato!');
+    }
+</script>
+</body>
+</html>
